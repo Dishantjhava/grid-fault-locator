@@ -1,0 +1,211 @@
+// ──────────────────────────────────────────────────────────────────────────────
+// WHY INCIDENT STORES SNAPSHOTS INSTEAD OF LIVE FOREIGN KEYS
+// ──────────────────────────────────────────────────────────────────────────────
+//
+// The natural instinct is to store `affected_pole_ids` as FK relations and
+// compute the set live (e.g. "poles WHERE current_energized = false").
+// That approach silently destroys historical truth the moment crew restores power:
+//
+//   T+0  Fault detected. 47 poles are dark.
+//   T+2h Crew restores the line. Poles flip to current_energized = true.
+//   T+2h "Which poles were affected?" → live join returns 0. Data gone.
+//
+// The same destruction applies to lat/lon and pincode: poles get re-surveyed
+// and corrected, but the incident's geography is a fact frozen at detection time.
+//
+// Incident must therefore be a sealed historical record — a snapshot of the
+// world at the moment of detection — because it drives:
+//   • SLA / SAIDI / SAIFI reporting (hours × households)
+//   • Crew dispatch and work-order records
+//   • Consumer grievance resolution (was this address in the affected area?)
+//   • ML training labels for future fault models
+//
+// We store the array directly in Postgres (String[]) rather than a join table
+// because the set is never queried by individual pole_id from the incident side;
+// it is always read as a whole snapshot. A join table would add joins with no
+// practical query benefit for this access pattern.
+// ──────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Enums ────────────────────────────────────────────────────────────────────
+
+enum PoleType {
+  distribution // Trunk pole on main LT line from DT
+  junction     // Fork point where a branch splits off the trunk
+  service      // Leaf pole at the end of a branch (feeds a service connection)
+}
+
+enum TelemetryEventType {
+  heartbeat
+  power_lost
+  power_restored
+  boot
+}
+
+enum IncidentStatus {
+  detected
+  acknowledged
+  crew_assigned
+  resolved
+  verified
+  closed
+}
+
+enum FaultType {
+  span        // Single-span wire break between two poles
+  dt          // Distribution transformer failure
+  feeder      // Upstream feeder-level fault
+  dead_sensor // Sensor silent but grid may be live (battery/comms fault)
+}
+
+enum TopologySource {
+  known    // Topology loaded from digitized network data
+  inferred // Topology reconstructed by algorithm from telemetry patterns
+}
+
+enum OutageScope {
+  feeder
+  dt
+}
+
+// ── Models ───────────────────────────────────────────────────────────────────
+
+model Feeder {
+  feeder_id     String @id
+  substation_id String
+
+  dts   DistributionTransformer[]
+  poles Pole[]
+
+  @@map("feeders")
+}
+
+model DistributionTransformer {
+  dt_id             String @id
+  feeder_id         String
+  lat               Float
+  lon               Float
+  capacity_kva      Int
+  households_served Int
+
+  feeder Feeder @relation(fields: [feeder_id], references: [feeder_id])
+  poles  Pole[]
+
+  @@map("distribution_transformers")
+}
+
+model Pole {
+  pole_id  String @id
+  lat      Float
+  lon      Float
+  feeder_id String
+  dt_id     String
+
+  // seq_on_line and parent_pole_id are NULL for ~60% of poles whose DT has not
+  // been digitized. The physical location is still recorded; only the topology
+  // link is missing. See prisma/seed.ts for the 40/60 split logic.
+  seq_on_line    Int?
+  parent_pole_id String?
+
+  pole_type PoleType
+  ward      String
+
+  // NULL for ~3% of poles — survey data not yet collected.
+  pincode String?
+
+  // NULL for ~9% of poles — no IoT device installed at this location.
+  device_id String? @unique
+
+  current_energized Boolean   @default(true)
+  last_seen_at      DateTime?
+
+  feeder Feeder                  @relation(fields: [feeder_id], references: [feeder_id])
+  dt     DistributionTransformer @relation(fields: [dt_id], references: [dt_id])
+
+  // Self-relation: parent_pole_id references another Pole in the radial tree.
+  // NULL for the root pole directly connected to the DT, and for all undigitized poles.
+  parent   Pole?  @relation("PoleTree", fields: [parent_pole_id], references: [pole_id])
+  children Pole[] @relation("PoleTree")
+
+  telemetry TelemetryEvent[]
+
+  @@index([feeder_id])
+  @@index([dt_id])
+  @@index([device_id])
+  @@map("poles")
+}
+
+model TelemetryEvent {
+  id        String             @id @default(cuid())
+  device_id String
+  pole_id   String
+  event     TelemetryEventType
+  energized Boolean
+  device_ts DateTime
+  seq       Int
+
+  // Optional fields — older firmware may not transmit all of these.
+  battery_mv Int?
+  rssi       Int?
+  fw         String?
+
+  received_at DateTime @default(now())
+
+  pole Pole @relation(fields: [pole_id], references: [pole_id])
+
+  @@index([pole_id])
+  @@index([device_id])
+  @@index([received_at])
+  @@unique([device_id, seq])
+  @@map("telemetry_events")
+}
+
+model Incident {
+  id         String         @id @default(cuid())
+  status     IncidentStatus @default(detected)
+  fault_type FaultType
+
+  // Snapshot arrays — see the long comment at the top of this file for rationale.
+  affected_pole_ids  String[]
+  boundary_pole_id   String? // Last known live pole upstream of the fault
+  first_dark_pole_id String? // First pole that reported power_lost
+
+  confidence        Float  // 0.0 – 1.0
+  confidence_reason String
+
+  // Geographic snapshot frozen at detection time.
+  lat     Float
+  lon     Float
+  pincode String?
+
+  households_affected Int
+  topology_source     TopologySource
+
+  created_at  DateTime  @default(now())
+  verified_at DateTime?
+  closed_at   DateTime?
+
+  @@index([status])
+  @@index([created_at])
+  @@map("incidents")
+}
+
+model ScheduledOutage {
+  id        String      @id @default(cuid())
+  scope     OutageScope
+  target_id String      // feeder_id or dt_id depending on scope
+  start     DateTime
+  end       DateTime
+  reason    String
+
+  @@index([start])
+  @@map("scheduled_outages")
+}
