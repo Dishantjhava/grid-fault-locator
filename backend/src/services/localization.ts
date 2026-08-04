@@ -6,6 +6,7 @@
  */
 
 import { buildDTPoleTree, DTPoleTree, TreeNode, haversineMeters } from './topology.js'
+import { identifyStalePoles, STALENESS_THRESHOLD_MS } from './staleness.js'
 
 export interface PoleState {
   pole_id: string
@@ -44,6 +45,9 @@ export interface LocalizationInput {
   scheduledOutages?: ScheduledOutageInfo[]
   now?: Date
   debounceWindowMs?: number // Default: 45,000 ms (45 seconds)
+  bypassDebounce?: boolean // Optional: bypass 45s debounce hold window (e.g. for instant simulator panel response)
+  stalePoleIds?: string[] // Optional explicit list of stale pole IDs
+  stalenessThresholdMs?: number // Default: 21 minutes
 }
 
 export interface DetectedIncident {
@@ -75,6 +79,7 @@ export interface LocalizationResult {
   suppressed_incidents: SuppressedIncident[]
   dead_sensors: string[] // List of pole_ids with dead telemetry sensors on live lines
   is_debouncing: boolean
+  stale_poles_detected: string[] // Poles whose dark state was inferred from silent staleness
 }
 
 /**
@@ -82,7 +87,13 @@ export interface LocalizationResult {
  * Given live/dark states of poles and grid topology, isolates exact fault boundaries.
  */
 export function localizeFaults(input: LocalizationInput): LocalizationResult {
-  const { dt, allDtsInFeeder, scheduledOutages = [], debounceWindowMs = 45000 } = input
+  const {
+    dt,
+    allDtsInFeeder,
+    scheduledOutages = [],
+    debounceWindowMs = 45000,
+    stalenessThresholdMs = STALENESS_THRESHOLD_MS,
+  } = input
   const now = input.now ? new Date(input.now) : new Date()
 
   const result: LocalizationResult = {
@@ -90,6 +101,7 @@ export function localizeFaults(input: LocalizationInput): LocalizationResult {
     suppressed_incidents: [],
     dead_sensors: [],
     is_debouncing: false,
+    stale_poles_detected: [],
   }
 
   if (!dt.poles || dt.poles.length === 0) {
@@ -102,19 +114,33 @@ export function localizeFaults(input: LocalizationInput): LocalizationResult {
     poleMap.set(p.pole_id, p)
   }
 
-  // 1. Build in-memory topology tree (Phase 3a)
+  // 1. Identify Stale Poles (Silent Devices)
+  // Evaluate silent poles (heartbeats stopped >= 21 min) if not passed explicitly
+  const stalePolesSet = new Set<string>(
+    input.stalePoleIds ?? identifyStalePoles(dt.poles, now, stalenessThresholdMs)
+  )
+  result.stale_poles_detected = Array.from(stalePolesSet)
+
+  // Raw physical/staleness dark check: dark if current_energized === false OR in stalePolesSet
+  const isRawDark = (poleId: string): boolean => {
+    if (stalePolesSet.has(poleId)) return true
+    const p = poleMap.get(poleId)
+    return p ? !p.current_energized : false
+  }
+
+  // 2. Build in-memory topology tree (Phase 3a)
   const tree = buildDTPoleTree(dt, dt.poles)
   if (!tree.root) {
     return result
   }
 
-  // 2. Identify Dead Sensors
-  // A dark pole whose subtree contains any live pole is a dead sensor, not a grid fault.
+  // 3. Identify Dead Sensors (REUSED UNIFIED PATH)
+  // A dark (or stale) pole whose subtree contains any live pole is a dead sensor, not a grid fault incident.
   const deadSensorPoles = new Set<string>()
 
   function checkSubtreeHasLive(node: TreeNode): boolean {
-    const pole = poleMap.get(node.pole_id)
-    const isSelfEnergized = pole ? pole.current_energized : true
+    const isDark = isRawDark(node.pole_id)
+    const isSelfEnergized = !isDark
 
     let childHasLive = false
     for (const child of node.children) {
@@ -137,18 +163,25 @@ export function localizeFaults(input: LocalizationInput): LocalizationResult {
   // Effective energized check treating dead sensors as electrically live
   const isEffectiveLive = (poleId: string): boolean => {
     if (deadSensorPoles.has(poleId)) return true
-    const p = poleMap.get(poleId)
-    return p ? p.current_energized : true
+    return !isRawDark(poleId)
   }
 
   // Check debounce timing across all poles in this DT
+  // A state change occurring within the last 45 seconds activates the debounce window.
   for (const p of dt.poles) {
     if (p.last_seen_at) {
       const lastSeen = new Date(p.last_seen_at)
       if (now.getTime() - lastSeen.getTime() < debounceWindowMs) {
-        result.is_debouncing = true;
+        result.is_debouncing = true
       }
     }
+  }
+
+  // DEBOUNCE HOLD ENFORCEMENT:
+  // If a state change arrived within the 45s window and bypassDebounce is false,
+  // hold incident publishing until the 45s window closes to collapse cascade storms into ONE incident.
+  if (result.is_debouncing && !input.bypassDebounce) {
+    return result
   }
 
   // Helper to collect all pole_ids in a subtree
@@ -160,7 +193,19 @@ export function localizeFaults(input: LocalizationInput): LocalizationResult {
     return ids
   }
 
-  // Helper to find nearest pole with a non-null pincode
+  /**
+   * PINCODE RESOLUTION & NEAREST NEIGHBOR FALLBACK:
+   * Per the system specification, ~3% of poles have a NULL pincode.
+   * If the boundary or representative pole has no pincode, we fall back to the pincode
+   * of the nearest neighboring pole (by Haversine distance) under the same DT that has one.
+   *
+   * REASONING & JUSTIFICATION:
+   * Poles under the same Distribution Transformer (DT) are geographically contiguous
+   * (typically within ~200-500 meters of each other). Therefore, using the nearest neighbor's
+   * pincode under the same DT provides a highly accurate local postal code proxy.
+   * If literally NO pole under the DT has a pincode (edge case), returns null, and the UI
+   * displays "PIN code unavailable".
+   */
   function getNearestPincode(targetLat: number, targetLon: number): string | null {
     let minDistance = Infinity
     let bestPincode: string | null = null
@@ -198,14 +243,17 @@ export function localizeFaults(input: LocalizationInput): LocalizationResult {
     return Math.round((poleIds.length / totalPoles) * dt.households_served)
   }
 
-  // 3. SPECIAL CASE: Check DT-wide or Feeder-wide fault
+  // 4. SPECIAL CASE: Check DT-wide or Feeder-wide fault
   const allPolesDark = dt.poles.every((p) => !isEffectiveLive(p.pole_id))
 
   if (allPolesDark) {
     let isFeederFault = false
     if (allDtsInFeeder && allDtsInFeeder.length > 0) {
       isFeederFault = allDtsInFeeder.every((otherDt) =>
-        otherDt.poles.every((p) => !p.current_energized)
+        otherDt.poles.every((p) => {
+          const isStale = stalePolesSet.has(p.pole_id)
+          return !p.current_energized || isStale
+        })
       )
     }
 
@@ -217,6 +265,10 @@ export function localizeFaults(input: LocalizationInput): LocalizationResult {
       tree.topology_source === 'known'
         ? `High confidence ${faultType.toUpperCase()}-level blackout verified by all connected sensors.`
         : `Medium confidence ${faultType.toUpperCase()}-level blackout based on inferred topology MST.`
+
+    if (stalePolesSet.size > 0) {
+      confidenceReason += ` Evidence: Dark state for ${stalePolesSet.size} pole(s) inferred from silent device staleness (>21 min no heartbeat) rather than explicit power_lost.`
+    }
 
     if (!rootPole.device_id) {
       confidence -= 0.2
@@ -249,7 +301,7 @@ export function localizeFaults(input: LocalizationInput): LocalizationResult {
     return result
   }
 
-  // 4. SPAN FAULT BOUNDARY DETECTION
+  // 5. UNIFIED SPAN FAULT BOUNDARY DETECTION
   // Walk tree to find boundaries where a live pole has a dark child
   const detectedSpanIncidents: DetectedIncident[] = []
 
@@ -261,8 +313,6 @@ export function localizeFaults(input: LocalizationInput): LocalizationResult {
 
       if (isNodeLive && !isChildLive) {
         // FOUND A SPAN FAULT BOUNDARY!
-        // node = boundary_pole (last live pole)
-        // child = first_dark_pole (first dark pole)
         const affectedIds = collectSubtreePoleIds(child)
         const livePoleState = poleMap.get(node.pole_id)!
         const darkPoleState = poleMap.get(child.pole_id)!
@@ -272,6 +322,20 @@ export function localizeFaults(input: LocalizationInput): LocalizationResult {
           tree.topology_source === 'known'
             ? `Exact span fault isolated between live pole ${node.pole_id} and dark pole ${child.pole_id}.`
             : `Span fault isolated based on inferred MST topology between ${node.pole_id} and ${child.pole_id}.`
+
+        // Check if dark state came from silent device staleness
+        const isChildStale = stalePolesSet.has(child.pole_id)
+        if (isChildStale) {
+          confidenceReason += ` Dark state for pole ${child.pole_id} inferred from silent device staleness (no heartbeat for >21 min) rather than explicit power_lost.`
+        }
+
+        // Ambiguous single stale leaf-pole case:
+        // A single stale pole at the leaf of a branch (no downstream children) is 50/50 ambiguous
+        // (could be a localized single-pole fault or a dead modem). Reduce confidence further.
+        if (affectedIds.length === 1 && isChildStale && child.children.length === 0) {
+          confidence -= 0.25
+          confidenceReason += ` Ambiguity Notice: Single stale leaf pole ${child.pole_id} with no downstream sensors — could be a localized line fault or an unverified dead modem.`
+        }
 
         let boundaryPoleId: string | null = node.pole_id
         let boundaryRange: string[] | undefined = undefined
@@ -321,7 +385,7 @@ export function localizeFaults(input: LocalizationInput): LocalizationResult {
 
   findBoundaries(tree.root)
 
-  // 5. Evaluate Scheduled Outage Suppression for all detected span incidents
+  // 6. Evaluate Scheduled Outage Suppression for all detected span incidents
   for (const inc of detectedSpanIncidents) {
     evaluateOutageSuppression(inc, dt, scheduledOutages, now, result)
   }

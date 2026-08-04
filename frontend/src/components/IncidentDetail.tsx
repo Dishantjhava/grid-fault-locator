@@ -107,7 +107,7 @@ export const IncidentDetail: React.FC<IncidentDetailProps> = ({
             Location & Pincode
           </span>
           <p className="font-semibold text-slate-200">
-            PIN: {incident.pincode || '560001 (Default BBMP)'}
+            PIN: {incident.pincode ? incident.pincode : 'PIN code unavailable'}
           </p>
           <p className="font-mono text-slate-400 text-[11px] mt-0.5">
             {incident.lat.toFixed(5)}, {incident.lon.toFixed(5)}

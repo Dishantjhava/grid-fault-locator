@@ -343,4 +343,48 @@ describe('Fault Localization & Boundary Finding (Phase 3b)', () => {
       'Transformer maintenance'
     )
   })
+
+  it('8. Pincode Fallback: incident boundary pole with null pincode resolves to nearest neighbor pincode', () => {
+    const poles: PoleState[] = [
+      {
+        pole_id: 'P1',
+        lat: 12.9700,
+        lon: 77.5900,
+        device_id: 'DEV-1',
+        pincode: null, // Boundary pole has NULL pincode!
+        current_energized: true,
+        parent_pole_id: null,
+        seq_on_line: 0,
+      },
+      {
+        pole_id: 'P2',
+        lat: 12.9701,
+        lon: 77.5901,
+        device_id: 'DEV-2',
+        pincode: null, // Dark pole also NULL pincode!
+        current_energized: false,
+        parent_pole_id: 'P1',
+        seq_on_line: 1,
+      },
+      {
+        pole_id: 'P3',
+        lat: 12.9702,
+        lon: 77.5902,
+        device_id: 'DEV-3',
+        pincode: '560034', // Neighbor pole under same DT has valid pincode!
+        current_energized: true,
+        parent_pole_id: 'P1',
+        seq_on_line: 2,
+      },
+    ]
+
+    const result = localizeFaults({ dt: { ...baseDt, poles } })
+
+    expect(result.incidents.length).toBe(1)
+    const inc = result.incidents[0]
+    expect(inc.boundary_pole_id).toBe('P1')
+    expect(inc.first_dark_pole_id).toBe('P2')
+    // Pincode MUST resolve to nearest neighbor "560034"!
+    expect(inc.pincode).toBe('560034')
+  })
 })
