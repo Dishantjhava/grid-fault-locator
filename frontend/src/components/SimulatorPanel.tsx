@@ -23,6 +23,7 @@ export const SimulatorPanel: React.FC<SimulatorPanelProps> = ({
   const [selectedDt, setSelectedDt] = useState<string>(
     transformers[0]?.dt_id || 'DT-001'
   )
+  const [instantMode, setInstantMode] = useState<boolean>(false)
   const [loading, setLoading] = useState(false)
   const [resultMsg, setResultMsg] = useState<string | null>(null)
 
@@ -48,6 +49,7 @@ export const SimulatorPanel: React.FC<SimulatorPanelProps> = ({
           action,
           dt_id: selectedDt,
           reason: 'Control Room Simulator Trigger',
+          ...(instantMode ? { bypass_debounce: true } : {}),
         }),
       })
 
@@ -56,9 +58,13 @@ export const SimulatorPanel: React.FC<SimulatorPanelProps> = ({
 
       if (action === 'repair') {
         setResultMsg(`Power restored for ${selectedDt}. Incidents re-evaluated.`)
+      } else if (data.is_debouncing && !instantMode) {
+        setResultMsg(
+          `Triggered ${action.replace('_', ' ').toUpperCase()} on ${selectedDt}. ⏳ Debouncing active: stabilization timer started (incident will auto-publish to sidebar in 45s). Check "Instant mode" to skip waiting.`
+        )
       } else {
         setResultMsg(
-          `Triggered ${action.replace('_', ' ').toUpperCase()} on ${selectedDt}. Created ${data.incidents_created ?? 1} incident(s).`
+          `Triggered ${action.replace('_', ' ').toUpperCase()} on ${selectedDt}. Created ${data.incidents_created ?? 0} incident(s).`
         )
       }
 
@@ -80,20 +86,32 @@ export const SimulatorPanel: React.FC<SimulatorPanelProps> = ({
           </h3>
         </div>
 
-        {/* DT Target Selection Dropdown */}
-        <div className="flex items-center gap-2">
-          <label className="text-xs text-slate-400 font-medium">Target DT:</label>
-          <select
-            value={selectedDt}
-            onChange={(e) => setSelectedDt(e.target.value)}
-            className="bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none focus:border-amber-500 font-mono"
-          >
-            {transformers.map((dt) => (
-              <option key={dt.dt_id} value={dt.dt_id}>
-                {dt.dt_id} ({dt.poles?.length || 0} poles, {dt.feeder_id})
-              </option>
-            ))}
-          </select>
+        {/* Controls: Instant Mode Toggle & Target DT */}
+        <div className="flex items-center gap-4">
+          <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={instantMode}
+              onChange={(e) => setInstantMode(e.target.checked)}
+              className="w-3.5 h-3.5 rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-amber-500 focus:ring-offset-slate-900"
+            />
+            <span>Instant mode (skip 45s debounce)</span>
+          </label>
+
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-slate-400 font-medium">Target DT:</label>
+            <select
+              value={selectedDt}
+              onChange={(e) => setSelectedDt(e.target.value)}
+              className="bg-slate-950 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none focus:border-amber-500 font-mono"
+            >
+              {transformers.map((dt) => (
+                <option key={dt.dt_id} value={dt.dt_id}>
+                  {dt.dt_id} ({dt.poles?.length || 0} poles, {dt.feeder_id})
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 

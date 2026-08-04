@@ -1,5 +1,6 @@
 import { FastifyPluginAsync } from 'fastify'
 import { Prisma } from '@prisma/client'
+import { processDTLocalization } from '../services/localizationRunner.js'
 
 interface TelemetryBody {
   device_id: string
@@ -65,6 +66,8 @@ const telemetryRoutes: FastifyPluginAsync = async (fastify) => {
        *    This endpoint performs minimal atomic DB operations and immediately returns HTTP 202 Accepted.
        */
       try {
+        let targetDtId: string | null = null
+
         await fastify.prisma.$transaction(async (tx) => {
           // Store event in append-only log
           await tx.telemetryEvent.create({
@@ -90,6 +93,12 @@ const telemetryRoutes: FastifyPluginAsync = async (fastify) => {
 
           // Update Pole current_energized and last_seen_at ONLY if this event is the newest sequence
           if (newestEvent && newestEvent.seq === body.seq) {
+            const poleRec = await tx.pole.findUnique({
+              where: { pole_id: body.pole_id },
+              select: { dt_id: true },
+            })
+            if (poleRec) targetDtId = poleRec.dt_id
+
             await tx.pole.updateMany({
               where: { pole_id: body.pole_id },
               data: {
@@ -99,6 +108,13 @@ const telemetryRoutes: FastifyPluginAsync = async (fastify) => {
             })
           }
         })
+
+        if (targetDtId) {
+          // Trigger debounced localization for this DT asynchronously out-of-band
+          processDTLocalization(fastify.prisma, targetDtId).catch((err) => {
+            console.error(`Error executing telemetry localization for DT ${targetDtId}:`, err)
+          })
+        }
 
         return reply.status(202).send({ status: 'accepted' })
       } catch (err: any) {

@@ -1,5 +1,7 @@
 import { FastifyPluginAsync } from 'fastify'
+import { processDTLocalization } from '../services/localizationRunner.js'
 import { localizeFaults, DTInfo } from '../services/localization.js'
+import { buildDTPoleTree, TreeNode } from '../services/topology.js'
 import { verifyIncidentResolution } from '../services/verification.js'
 import {
   generateAISummary,
@@ -18,13 +20,14 @@ interface SimulatorInjectBody {
   feeder_id?: string
   target_pole_id?: string
   reason?: string
+  bypass_debounce?: boolean
 }
 
 const simulatorRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: SimulatorInjectBody }>(
     '/simulator/inject',
     async (request, reply) => {
-      const { action, dt_id, feeder_id, target_pole_id, reason } = request.body
+      const { action, dt_id, feeder_id, target_pole_id, reason, bypass_debounce = false } = request.body
 
       const now = new Date()
 
@@ -126,9 +129,35 @@ const simulatorRoutes: FastifyPluginAsync = async (fastify) => {
           data: { current_energized: false, last_seen_at: now },
         })
       } else {
-        // span_fault (default) — darken half of the poles starting mid-tree
-        const halfIndex = Math.floor(dbDt.poles.length / 2)
-        poleIdsToDarken = dbDt.poles.slice(halfIndex).map((p) => p.pole_id)
+        // span_fault (default) — build topological tree (known or inferred MST)
+        // and darken a downstream subtree starting from a mid-tree node
+        const tree = buildDTPoleTree(
+          { dt_id: dbDt.dt_id, lat: dbDt.lat, lon: dbDt.lon },
+          dbDt.poles.map((p) => ({
+            pole_id: p.pole_id,
+            lat: p.lat,
+            lon: p.lon,
+            parent_pole_id: p.parent_pole_id,
+            seq_on_line: p.seq_on_line,
+          }))
+        )
+
+        if (tree.root && tree.root.children.length > 0) {
+          // Pick a child node of the root node
+          const targetNode = tree.root.children[0]
+          const getSubtreeIds = (node: TreeNode): string[] => {
+            const ids = [node.pole_id]
+            for (const child of node.children) {
+              ids.push(...getSubtreeIds(child))
+            }
+            return ids
+          }
+          poleIdsToDarken = getSubtreeIds(targetNode)
+        } else {
+          // Fallback if tree has no children
+          const halfIndex = Math.floor(dbDt.poles.length / 2)
+          poleIdsToDarken = dbDt.poles.slice(halfIndex).map((p) => p.pole_id)
+        }
       }
 
       if (action !== 'dead_sensor' && poleIdsToDarken.length > 0) {
@@ -139,131 +168,18 @@ const simulatorRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       // Run localization algorithm (Phase 3b)
-      const refreshedDt = await fastify.prisma.distributionTransformer.findUnique({
-        where: { dt_id: targetDtId },
-        include: { poles: true },
-      })
-
-      const allDts = await fastify.prisma.distributionTransformer.findMany({
-        where: { feeder_id: dbDt.feeder_id },
-        include: { poles: true },
-      })
-
-      const outages = await fastify.prisma.scheduledOutage.findMany()
-
-      const dtInfo: DTInfo = {
-        dt_id: refreshedDt!.dt_id,
-        feeder_id: refreshedDt!.feeder_id,
-        lat: refreshedDt!.lat,
-        lon: refreshedDt!.lon,
-        households_served: refreshedDt!.households_served,
-        poles: refreshedDt!.poles.map((p) => ({
-          pole_id: p.pole_id,
-          lat: p.lat,
-          lon: p.lon,
-          device_id: p.device_id,
-          pincode: p.pincode,
-          current_energized: p.current_energized,
-          last_seen_at: p.last_seen_at,
-          parent_pole_id: p.parent_pole_id,
-          seq_on_line: p.seq_on_line,
-        })),
-      }
-
-      const localization = localizeFaults({
-        dt: dtInfo,
-        allDtsInFeeder: allDts.map((d) => ({
-          dt_id: d.dt_id,
-          feeder_id: d.feeder_id,
-          lat: d.lat,
-          lon: d.lon,
-          households_served: d.households_served,
-          poles: d.poles.map((p) => ({
-            pole_id: p.pole_id,
-            lat: p.lat,
-            lon: p.lon,
-            device_id: p.device_id,
-            pincode: p.pincode,
-            current_energized: p.current_energized,
-            parent_pole_id: p.parent_pole_id,
-            seq_on_line: p.seq_on_line,
-          })),
-        })),
-        scheduledOutages: outages.map((o) => ({
-          id: o.id,
-          scope: o.scope as any,
-          target_id: o.target_id,
-          start: o.start,
-          end: o.end,
-          reason: o.reason,
-        })),
+      const result = await processDTLocalization(fastify.prisma, targetDtId, {
         now,
+        bypassDebounce: bypass_debounce,
       })
-
-      // Store detected incidents in DB immediately with template fallback summary
-      for (const inc of localization.incidents) {
-        const initialSummary = generateTemplateFallbackSummary({
-          id: 'PENDING',
-          fault_type: inc.fault_type,
-          topology_source: inc.topology_source,
-          affected_pole_ids: inc.affected_pole_ids,
-          boundary_pole_id: inc.boundary_pole_id,
-          boundary_pole_range: inc.boundary_pole_range,
-          first_dark_pole_id: inc.first_dark_pole_id,
-          confidence: inc.confidence,
-          confidence_reason: inc.confidence_reason,
-          pincode: inc.pincode,
-          households_affected: inc.households_affected,
-        })
-
-        const createdIncident = await fastify.prisma.incident.create({
-          data: {
-            fault_type: inc.fault_type as any,
-            status: 'detected',
-            affected_pole_ids: inc.affected_pole_ids,
-            boundary_pole_id: inc.boundary_pole_id,
-            first_dark_pole_id: inc.first_dark_pole_id,
-            confidence: inc.confidence,
-            confidence_reason: initialSummary,
-            lat: inc.lat,
-            lon: inc.lon,
-            pincode: inc.pincode,
-            households_affected: inc.households_affected,
-            topology_source: inc.topology_source as any,
-          },
-        })
-
-        // ASYNC NON-BLOCKING: Trigger background AI summary update (updates DB if AI summary finishes)
-        generateAISummary({
-          id: createdIncident.id,
-          fault_type: inc.fault_type,
-          topology_source: inc.topology_source,
-          affected_pole_ids: inc.affected_pole_ids,
-          boundary_pole_id: inc.boundary_pole_id,
-          boundary_pole_range: inc.boundary_pole_range,
-          first_dark_pole_id: inc.first_dark_pole_id,
-          confidence: inc.confidence,
-          confidence_reason: inc.confidence_reason,
-          pincode: inc.pincode,
-          households_affected: inc.households_affected,
-        })
-          .then(async (aiText) => {
-            if (aiText && aiText !== initialSummary) {
-              await fastify.prisma.incident.update({
-                where: { id: createdIncident.id },
-                data: { confidence_reason: aiText },
-              })
-            }
-          })
-          .catch(() => {})
-      }
 
       return reply.send({
         success: true,
         action,
-        incidents_created: localization.incidents.length,
-        dead_sensors_flagged: localization.dead_sensors,
-        suppressed_count: localization.suppressed_incidents.length,
+        incidents_created: result.incidents_created,
+        is_debouncing: result.is_debouncing,
+        dead_sensors_flagged: result.dead_sensors,
+        suppressed_count: result.suppressed_incidents?.length ?? 0,
       })
     }
   )
