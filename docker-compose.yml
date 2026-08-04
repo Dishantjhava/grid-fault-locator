@@ -1,6 +1,10 @@
+version: '3.8'
+
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: gridfault-postgres
+    restart: always
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -9,8 +13,6 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    # The healthcheck lets dependent services wait until postgres is actually
-    # accepting connections, not just the moment the process starts.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -20,27 +22,31 @@ services:
   backend:
     build:
       context: ./backend
+      dockerfile: Dockerfile
+    container_name: gridfault-backend
+    restart: always
     ports:
       - "3001:3001"
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/gridfault
       PORT: "3001"
+      NODE_ENV: development
     depends_on:
       postgres:
         condition: service_healthy
-    # Run prisma db push before starting the server.
-    # db push applies the schema to the database without generating a migration
-    # file, which is fine for a dev environment where we're still changing the schema.
-    # --accept-data-loss allows destructive changes (drop columns etc.) without
-    # prompting, since we want this to run unattended.
     command: >
       sh -c "npx prisma db push --accept-data-loss && npx tsx prisma/seed.ts && npx tsx src/server.ts"
 
   frontend:
     build:
       context: ./frontend
+      dockerfile: Dockerfile
+    container_name: gridfault-frontend
+    restart: always
     ports:
       - "5173:5173"
+    environment:
+      VITE_BACKEND_URL: http://localhost:3001
     depends_on:
       - backend
 

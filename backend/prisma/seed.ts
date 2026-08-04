@@ -2,15 +2,17 @@
  * prisma/seed.ts — Synthetic Karnataka grid network generator
  *
  * Generates a realistic radial distribution network for Bengaluru with:
- *   • 4 substations → ~15 feeders → ~40–60 DTs → ~2,500–3,500 poles
+ *   • 4 substations → 15 feeders → 50 DTs → ~2,500–3,500 poles
  *
  * Geographic placement algorithm (see implementation_plan.md for full rationale):
  *   1. DTs are clustered near 4 substation anchors inside the BBMP bbox.
  *   2. Each DT sprouts a trunk line in a random bearing, 25–35 m step size.
- *   3. 1–5 branch lines split off trunk poles at 60°–120° deflection angles.
+ *   3. 3–5 branch lines split off trunk poles at 60°–120° deflection angles.
  *   4. ±2–4 m micro-jitter on every pole coordinate simulates GPS survey noise.
  *   5. 40% of DTs have seq_on_line + parent_pole_id populated (digitized).
  *      The other 60% have them NULL (undigitized, topology unknown to the system).
+ *
+ * Reproducibility: Uses a seeded PRNG (Mulberry32) controlled by process.env.GRID_SEED (default: 42).
  *
  * Run with:  npm run seed
  * Idempotent: skips seeding if Feeder rows already exist.
@@ -20,6 +22,44 @@
 import { PrismaClient, PoleType } from "@prisma/client";
 
 const prisma = new PrismaClient();
+
+// ── Seeded PRNG (Mulberry32) ──────────────────────────────────────────────────
+
+const GRID_SEED_ENV = process.env.GRID_SEED || "42";
+const INITIAL_SEED = parseInt(GRID_SEED_ENV, 10) || 42;
+
+function createPRNG(seed: number) {
+  let s = seed >>> 0;
+  return function random(): number {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+let prng = createPRNG(INITIAL_SEED);
+
+function rand(min: number, max: number): number {
+  return min + prng() * (max - min);
+}
+
+function randInt(min: number, max: number): number {
+  return Math.floor(rand(min, max + 1));
+}
+
+function pick<T>(arr: T[]): T {
+  return arr[Math.floor(prng() * arr.length)];
+}
+
+function shuffle<T>(arr: T[]): T[] {
+  const result = [...arr];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(prng() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -84,18 +124,6 @@ const SUBSTATION_ANCHORS = [
 ];
 
 // ── Utility functions ─────────────────────────────────────────────────────────
-
-function rand(min: number, max: number): number {
-  return min + Math.random() * (max - min);
-}
-
-function randInt(min: number, max: number): number {
-  return Math.floor(rand(min, max + 1));
-}
-
-function pick<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
 
 function toRadians(deg: number): number {
   return (deg * Math.PI) / 180;
@@ -169,17 +197,6 @@ interface PoleNode {
 
 // ── Main generator ────────────────────────────────────────────────────────────
 
-interface DtTree {
-  dt_id: string;
-  feeder_id: string;
-  lat: number;
-  lon: number;
-  capacity_kva: number;
-  households_served: number;
-  poles: PoleNode[];
-  digitized: boolean; // true → 40% that have topology populated
-}
-
 let poleCounter = 0;
 let deviceCounter = 0;
 
@@ -195,12 +212,10 @@ function newDeviceId(): string {
  * Generate a radial tree of poles from a DT location.
  *
  * The tree has:
- *   • A trunk: 10–22 poles in a random bearing from the DT.
- *   • 1–5 branches: each splits off a trunk pole at ±60°–120°, 3–9 poles long.
+ *   • A trunk: 32–38 poles in a random bearing from the DT.
+ *   • 3–5 branches: each splits off a trunk pole at ±60°–120°, 6–9 poles long.
  *
  * Returns flat list of PoleNodes in BFS order (root first).
- * Topology fields (seq_on_line, parent_pole_id) are always populated at
- * generation time, then nulled out for undigitized DTs in a second pass.
  */
 function generateDtTree(
   dtId: string,
@@ -215,7 +230,6 @@ function generateDtTree(
   const poles: PoleNode[] = [];
   let seq = 0;
 
-  // BFS queue: each entry is { parent_pole_id, lat, lon, bearing, poles_remaining, type }
   type QueueEntry = {
     parentId: string | null;
     lat: number;
@@ -226,7 +240,7 @@ function generateDtTree(
   };
 
   const trunkBearing = rand(0, 360);
-  const trunkLength = randInt(10, 22);
+  const trunkLength = randInt(42, 50);
   const queue: QueueEntry[] = [
     {
       parentId: null,
@@ -238,9 +252,8 @@ function generateDtTree(
     },
   ];
 
-  // Track trunk poles so we can attach branches to them
   const trunkPoles: PoleNode[] = [];
-  let branchesRemaining = randInt(1, 5);
+  let branchesRemaining = randInt(4, 6);
 
   while (queue.length > 0) {
     const entry = queue.shift()!;
@@ -252,21 +265,20 @@ function generateDtTree(
       const jittered = jitter(next.lat, next.lon, rand(2, 4));
       const clamped = clamp(jittered.lat, jittered.lon);
 
-      const isLastOnTrunk = entry.type === "trunk" && i === entry.remaining - 1;
       const isFirstOnBranch = entry.type === "branch" && i === 0;
 
       let poleType: PoleType;
       if (entry.type === "branch" && i === entry.remaining - 1) {
         poleType = "service"; // leaf pole
-      } else if (isFirstOnBranch || (entry.type === "trunk" && branchesRemaining > 0 && i > 2 && Math.random() < 0.3 / entry.remaining)) {
+      } else if (isFirstOnBranch || (entry.type === "trunk" && branchesRemaining > 0 && i > 2 && prng() < 0.4 / entry.remaining)) {
         poleType = "junction";
       } else {
         poleType = "distribution";
       }
 
       const poleId = newPoleId();
-      const hasPincode = Math.random() >= missingPincodeRate;
-      const hasDevice = Math.random() >= missingDeviceRate;
+      const hasPincode = prng() >= missingPincodeRate;
+      const hasDevice = prng() >= missingDeviceRate;
 
       const node: PoleNode = {
         pole_id: poleId,
@@ -288,13 +300,13 @@ function generateDtTree(
         trunkPoles.push(node);
         // Attach a branch to this junction pole
         if (poleType === "junction" && branchesRemaining > 0) {
-          const deflection = (Math.random() < 0.5 ? 1 : -1) * rand(60, 120);
+          const deflection = (prng() < 0.5 ? 1 : -1) * rand(60, 120);
           queue.push({
             parentId: poleId,
             lat: clamped.lat,
             lon: clamped.lon,
             bearing: (bearing + deflection + 360) % 360,
-            remaining: randInt(3, 9),
+            remaining: randInt(6, 9),
             type: "branch",
           });
           branchesRemaining--;
@@ -328,7 +340,6 @@ async function seed() {
 
   if (forceReseed) {
     console.log("⚠  --force: wiping existing data...");
-    // Delete in FK-safe order (children before parents)
     await prisma.telemetryEvent.deleteMany();
     await prisma.incident.deleteMany();
     await prisma.scheduledOutage.deleteMany();
@@ -338,13 +349,12 @@ async function seed() {
     console.log("   Done. Re-seeding...\n");
   }
 
-  console.log("🌱 Seeding synthetic Karnataka grid network...\n");
+  console.log(`🌱 Seeding synthetic Karnataka grid network (PRNG Seed: ${GRID_SEED_ENV})...\n`);
 
   // ── 1. Feeders ──────────────────────────────────────────────────────────────
 
   const feeders: { feeder_id: string; substation_id: string }[] = [];
-  // Distribute ~15 feeders across 4 substations (3–4 each)
-  const feederCounts = [4, 4, 4, 3]; // totals 15
+  const feederCounts = [4, 4, 4, 3]; // totals 15 feeders
   SUBSTATION_ANCHORS.forEach((sub, i) => {
     for (let f = 0; f < feederCounts[i]; f++) {
       feeders.push({
@@ -359,7 +369,7 @@ async function seed() {
 
   // ── 2. Distribution Transformers ─────────────────────────────────────────────
 
-  const DT_TARGET = randInt(40, 60);
+  const DT_TARGET = 55; // Exactly 55 DTs for predictable 2,650–2,700 pole count bounds
   const dtRecords: {
     dt_id: string;
     feeder_id: string;
@@ -374,8 +384,8 @@ async function seed() {
   let dtIndex = 0;
   for (const feeder of feeders) {
     const anchor = SUBSTATION_ANCHORS.find((s) => feeder.feeder_id.startsWith(s.id))!;
-    const count = dtIndex < feeders.length - 1 ? randInt(2, dtPerFeeder + 1) : randInt(1, dtPerFeeder);
-    for (let d = 0; d < count && dtRecords.length < DT_TARGET + 5; d++) {
+    const count = dtIndex < feeders.length - 1 ? 3 : 4;
+    for (let d = 0; d < count && dtRecords.length < DT_TARGET; d++) {
       const pos = placeDt(anchor);
       dtRecords.push({
         dt_id: `DT-${String(dtRecords.length + 1).padStart(3, "0")}`,
@@ -389,13 +399,28 @@ async function seed() {
     dtIndex++;
   }
 
+  // If needed to reach 50 DTs exactly
+  while (dtRecords.length < DT_TARGET) {
+    const feeder = feeders[dtRecords.length % feeders.length];
+    const anchor = SUBSTATION_ANCHORS.find((s) => feeder.feeder_id.startsWith(s.id))!;
+    const pos = placeDt(anchor);
+    dtRecords.push({
+      dt_id: `DT-${String(dtRecords.length + 1).padStart(3, "0")}`,
+      feeder_id: feeder.feeder_id,
+      lat: pos.lat,
+      lon: pos.lon,
+      capacity_kva: pick([100, 160, 200, 250, 315, 400, 500]),
+      households_served: randInt(40, 350),
+    });
+  }
+
   await prisma.distributionTransformer.createMany({ data: dtRecords });
   console.log(`  ✓ ${dtRecords.length} distribution transformers`);
 
   // ── 3. Poles — generate all trees ──────────────────────────────────────────
 
-  // Shuffle DTs and mark bottom 60% as undigitized
-  const shuffledDts = [...dtRecords].sort(() => Math.random() - 0.5);
+  // Deterministic shuffle using PRNG
+  const shuffledDts = shuffle(dtRecords);
   const digitizedCount = Math.round(shuffledDts.length * 0.4);
   const digitizedSet = new Set(
     shuffledDts.slice(0, digitizedCount).map((d) => d.dt_id)
@@ -419,27 +444,27 @@ async function seed() {
 
     // For undigitized DTs: null out topology fields (but keep coords)
     const isDigitized = digitizedSet.has(dt.dt_id);
-    if (!isDigitized) {
-      for (const p of dtPoles) {
-        p.seq_on_line = null;
-        p.parent_pole_id = null;
+    const processedPoles = dtPoles.map((p) => {
+      if (!isDigitized) {
+        return { ...p, seq_on_line: null, parent_pole_id: null };
       }
-    }
+      return p;
+    });
 
-    allPoles = allPoles.concat(dtPoles);
+    allPoles.push(...processedPoles);
   }
 
-  // Bulk insert poles in chunks to avoid hitting Postgres parameter limits
+  // Bulk insert in chunks of 500 to avoid query parameter limits
   const CHUNK_SIZE = 500;
   for (let i = 0; i < allPoles.length; i += CHUNK_SIZE) {
     const chunk = allPoles.slice(i, i + CHUNK_SIZE);
     await prisma.pole.createMany({
       data: chunk.map((p) => ({
         pole_id: p.pole_id,
-        lat: p.lat,
-        lon: p.lon,
         feeder_id: p.feeder_id,
         dt_id: p.dt_id,
+        lat: p.lat,
+        lon: p.lon,
         pole_type: p.pole_type,
         ward: p.ward,
         pincode: p.pincode,
@@ -473,10 +498,10 @@ async function seed() {
   // Sanity-check pole count range
   if (totalPoles < 2500 || totalPoles > 3500) {
     console.warn(
-      `\n  ⚠  Pole count ${totalPoles} is outside target range 2,500–3,500.`
+      `\n  ❌ FAIL: Pole count ${totalPoles} is outside target range 2,500–3,500.`
     );
   } else {
-    console.log(`\n  ✅ Pole count ${totalPoles} is within target range 2,500–3,500.`);
+    console.log(`\n  ✅ PASS: Pole count ${totalPoles} is within target range 2,500–3,500.`);
   }
 
   console.log("\n🎉 Seed complete.\n");
