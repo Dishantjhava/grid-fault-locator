@@ -8,8 +8,8 @@ RUN npm install
 
 COPY . .
 
+RUN npm run build
+
 EXPOSE 5173
 
-# "npm run dev" calls vite, and vite.config.ts sets host: '0.0.0.0'
-# so the dev server binds to all interfaces inside the container.
-CMD ["npm", "run", "dev"]
+CMD ["npx", "vite", "preview", "--port", "5173", "--host", "0.0.0.0"]
