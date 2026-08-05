@@ -20,4 +20,4 @@ COPY . .
 EXPOSE 3001
 
 # Default command — docker-compose overrides this with the prisma push + start chain.
-CMD ["npx", "tsx", "src/server.ts"]
+CMD ["sh", "-c", "npx prisma db push --accept-data-loss && npx tsx prisma/seed.ts && npx tsx src/server.ts"]
