@@ -1,12 +1,7 @@
 import { FastifyPluginAsync } from 'fastify'
 import { processDTLocalization } from '../services/localizationRunner.js'
-import { localizeFaults, DTInfo } from '../services/localization.js'
 import { buildDTPoleTree, TreeNode } from '../services/topology.js'
 import { verifyIncidentResolution } from '../services/verification.js'
-import {
-  generateAISummary,
-  generateTemplateFallbackSummary,
-} from '../services/aiSummary.js'
 
 interface SimulatorInjectBody {
   action:
