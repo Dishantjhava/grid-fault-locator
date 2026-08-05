@@ -32,14 +32,8 @@ const simulatorRoutes: FastifyPluginAsync = async (fastify) => {
       const now = new Date()
 
       if (action === 'repair') {
-        // Repair fault: set poles back to energized = true
-        let whereCondition: any = {}
-        if (dt_id) whereCondition.dt_id = dt_id
-        if (feeder_id) whereCondition.feeder_id = feeder_id
-        if (target_pole_id) whereCondition.pole_id = target_pole_id
-
+        // Repair fault: set poles back to energized = true across grid
         await fastify.prisma.pole.updateMany({
-          where: whereCondition,
           data: { current_energized: true, last_seen_at: now },
         })
 
