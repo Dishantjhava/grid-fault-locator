@@ -4,14 +4,13 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
-    // Bind to all interfaces so the container port is reachable from the host.
     host: '0.0.0.0',
     port: 5173,
-    allowedHosts: true,
+    allowedHosts: ['.up.railway.app', '.railway.app', 'steadfast-nourishment-production-7968.up.railway.app'],
   },
   preview: {
     host: '0.0.0.0',
     port: 5173,
-    allowedHosts: true,
+    allowedHosts: ['.up.railway.app', '.railway.app', 'steadfast-nourishment-production-7968.up.railway.app'],
   },
 })
