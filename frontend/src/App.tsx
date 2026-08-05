@@ -13,7 +13,7 @@ export function App() {
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date())
   const [isRefreshing, setIsRefreshing] = useState(false)
 
-  const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001'
+  const backendUrl = import.meta.env.VITE_BACKEND_URL || 'https://grid-fault-locator-production.up.railway.app'
 
   const fetchData = useCallback(async () => {
     setIsRefreshing(true)
