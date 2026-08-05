@@ -19,6 +19,7 @@
  *             Pass --force to wipe and re-seed.
  */
 
+import "dotenv/config";
 import { PrismaClient, PoleType } from "@prisma/client";
 
 const prisma = new PrismaClient();
@@ -326,13 +327,16 @@ function generateDtTree(
 async function seed() {
   const forceReseed = process.argv.includes("--force");
 
-  // Idempotency check
+  // Idempotency check: if not forcing, wipe active incidents & outages so start state is 0 Active Incidents
   if (!forceReseed) {
     const existingCount = await prisma.feeder.count();
     if (existingCount > 0) {
+      // Clear any leftover incidents from previous testing runs
+      await prisma.incident.deleteMany();
+      await prisma.scheduledOutage.deleteMany();
+      await prisma.pole.updateMany({ data: { current_energized: true } });
       console.log(
-        `✓ Database already seeded (${existingCount} feeders found). ` +
-          `Pass --force to wipe and re-seed.`
+        `✓ Database ready (${existingCount} feeders found). Cleared past incidents → 0 Active Incidents.`
       );
       return;
     }
