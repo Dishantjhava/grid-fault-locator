@@ -27,37 +27,18 @@ const simulatorRoutes: FastifyPluginAsync = async (fastify) => {
       const now = new Date()
 
       if (action === 'repair') {
-        // Repair fault: set poles back to energized = true across grid
+        // Repair fault: set all poles back to energized = true across grid
         await fastify.prisma.pole.updateMany({
           data: { current_energized: true, last_seen_at: now },
         })
 
-        // Check any 'resolved' incidents and auto-advance them if verified
-        const resolvedIncidents = await fastify.prisma.incident.findMany({
-          where: { status: 'resolved' },
-        })
-
-        for (const inc of resolvedIncidents) {
-          const poles = await fastify.prisma.pole.findMany({
-            where: { pole_id: { in: inc.affected_pole_ids } },
-            select: { pole_id: true, current_energized: true },
-          })
-          const verification = verifyIncidentResolution(inc, poles, now)
-          if (verification.verified) {
-            await fastify.prisma.incident.update({
-              where: { id: inc.id },
-              data: {
-                status: 'closed',
-                verified_at: now,
-                closed_at: now,
-              },
-            })
-          }
-        }
+        // Clear active incidents and scheduled outages from previous testing runs
+        await fastify.prisma.incident.deleteMany()
+        await fastify.prisma.scheduledOutage.deleteMany()
 
         return reply.send({
           success: true,
-          message: `Power restored for ${dt_id || feeder_id || 'all poles'}. Telemetry updated.`,
+          message: `Power restored for all poles. Cleared past test incidents -> 0 Active Incidents.`,
         })
       }
 

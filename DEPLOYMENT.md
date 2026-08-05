@@ -57,16 +57,27 @@ cp .env.example .env
 
 ## 4. Verification & Health Checks
 
+### Live Production Railway Deployment:
+- **Live Frontend UI**: [https://steadfast-nourishment-production-7968.up.railway.app](https://steadfast-nourishment-production-7968.up.railway.app)
+- **Live Backend Health**: [https://grid-fault-locator-production.up.railway.app/health](https://grid-fault-locator-production.up.railway.app/health)
+  ```bash
+  curl -s https://grid-fault-locator-production.up.railway.app/health
+  # Expected output: {"status":"ok"}
+  ```
+
+---
+
+### Local Docker Environment:
 Once `docker compose up --build` finishes starting:
 
-1. **Verify Backend Health**:
+1. **Verify Local Backend Health**:
    Open `http://localhost:3001/health` in browser or run:
    ```bash
    curl -s http://localhost:3001/health
    # Expected output: {"status":"ok"}
    ```
 
-2. **Verify Operator Console UI**:
+2. **Verify Local Operator Console UI**:
    Open `http://localhost:5173` in browser:
    - The dark-themed **Karnataka Power Distribution Console** loads.
    - The map displays the Bengaluru BBMP region with blue DT markers and green live poles.

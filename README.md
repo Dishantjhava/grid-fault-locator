@@ -17,9 +17,17 @@ When I analyzed the brief, I realized three physical truths about the problem:
 
 ---
 
-## 🚀 Quick Start (One Command)
+## 🌐 Live Production Railway Deployment
 
-I containerized the entire stack so any reviewer can spin it up with a single command without installing dependencies:
+- **Live 2 AM Operator Console**: [https://steadfast-nourishment-production-7968.up.railway.app](https://steadfast-nourishment-production-7968.up.railway.app)
+- **Live Backend API Health Check**: [https://grid-fault-locator-production.up.railway.app/health](https://grid-fault-locator-production.up.railway.app/health)
+- **5-Minute Walkthrough Video**: [Watch 5-Minute System Walkthrough (Loom Link)](https://loom.com/share/grid-fault-locator-demo-placeholder)
+
+---
+
+## 🚀 Local Quick Start (Docker One-Command Execution)
+
+To run the full stack locally via Docker:
 
 ```bash
 git clone https://github.com/Dishantjhava/grid-fault-locator.git
@@ -27,16 +35,9 @@ cd grid-fault-locator
 docker compose up --build
 ```
 
-- **2 AM Operator Console**: [http://localhost:5173](http://localhost:5173)
-- **Backend API Health Check**: [http://localhost:3001/health](http://localhost:3001/health)
-- **PostgreSQL Database**: `localhost:5432`
-
----
-
-## 📹 5-Minute Walkthrough Video & Live URL
-
-- **Demo Video**: [Watch 5-Minute System Walkthrough (Loom Link)](https://loom.com/share/grid-fault-locator-demo-placeholder)
-- **Deployed Cloud URL**: [https://grid-fault-locator.up.railway.app](https://grid-fault-locator.up.railway.app) *(or http://localhost:5173 for local review)*
+- **2 AM Operator Console**: [https://steadfast-nourishment-production-7968.up.railway.app](https://steadfast-nourishment-production-7968.up.railway.app)
+- **Backend API Health Check**: [https://grid-fault-locator-production.up.railway.app/health](https://grid-fault-locator-production.up.railway.app/health)
+- **PostgreSQL Database**: Railway Managed Instance (`postgresql://...`)
 
 ---
 
